@@ -1,0 +1,16 @@
+SEED:
+  default:
+    dataset: SEED
+    dataset_path: /home/pwjworks/pytorch/emotion_TL-GNNs/ExtractedFeatures/
+    processed_path: /home/pwjworks/pytorch/emotion_TL-GNNs/processed_dataset/
+    feature: de_LDS
+    epochs: 200
+    subjects: 15
+    pretrain: false
+    times: 10
+    classes: 3
+    channels: 62
+    train_setting:
+      batch_size: 16
+      drop_rate: 0.5
+      lr: 1e-5
