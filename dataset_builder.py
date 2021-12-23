@@ -73,7 +73,7 @@ def get_dataset(config, session_id, subject_index):
         config['dataset'], config['feature'], 'Train_session'+str(session_id), config['subjects'], subject_index)
     print(path)
     if not os.path.exists(path):
-        build_SEED_dataset(config)
+        build_SEED_dataset(config, session_id)
 
     train_dataset = EmotionDataset(config, 'Train_session'+str(session_id), root,
                                    subject_index, None)

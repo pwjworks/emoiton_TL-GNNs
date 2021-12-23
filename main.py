@@ -1,4 +1,5 @@
-from dataset_builder import build_dataset, get_dataset
+from dataset_builder import get_dataset, build_SEED_dataset
+from utils.process_SEED import get_data_label_from_mat
 from sklearn.metrics import roc_auc_score, accuracy_score
 from torch_geometric.loader import DataLoader
 from dataset_builder import get_dataset
@@ -8,12 +9,20 @@ import torch
 import os
 import pandas as pd
 import numpy as np
+import math
 
+# see https://github.com/thuml/Transfer-Learning-Library
+from dalib.modules.domain_discriminator import DomainDiscriminator
+from dalib.adaptation.dan import MultipleKernelMaximumMeanDiscrepancy
+from dalib.modules.kernels import GaussianKernel
+
+from models.SEED.encoder_SOGAT import in_encoder_sogat2
+from models.SEED.MSMDAER import MSMDAERNet
 
 """
 Settings for training
 """
-Network = None
+Network = MSMDAERNet
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -23,7 +32,7 @@ def recorder(train_config, run_config):
     print('***'*20)
     version = 1
     dfile = ''
-    root = '/home/pwjworks/pytorch/emotion_gnns/result/{:s}/{:s}/{:s}'.format(
+    root = '/home/pwjworks/pytorch/emotion_TL-GNNs/results/{:s}/{:s}/{:s}'.format(
         time.strftime('%m.%d'), run_config['dataset'], run_config['feature'])
     if not os.path.exists(root):
         os.makedirs(root)
@@ -44,7 +53,16 @@ def recorder(train_config, run_config):
     return dfile, version
 
 
-def transfer_train(model, train_loader, test_loader, crit, optimizer, classes, dann_loss):
+def get_transfer_learning_model():
+    domain_discriminator = DomainDiscriminator(
+        in_feature=512, hidden_size=4096).cuda()
+    kernels = (GaussianKernel(alpha=0.5), GaussianKernel(
+        alpha=1.), GaussianKernel(alpha=2.))
+    dann_loss = MultipleKernelMaximumMeanDiscrepancy(kernels).cuda()
+    return domain_discriminator, dann_loss
+
+
+def transfer_train(model, train_loader, test_loader, crit, optimizer, classes, dann_loss, iteration, subject_index):
     """transfer learning train
 
     Args:
@@ -58,71 +76,38 @@ def transfer_train(model, train_loader, test_loader, crit, optimizer, classes, d
     """
     model.train()
     loss_all = 0
+    source_iter = iter(train_loader)
+    target_iter = iter(test_loader)
+    for i in range(1, iteration+1):
+        # extract data
+        try:
+            source_data, source_label = next(source_iter).x.view(-1, 310)
+            source_label = torch.argmax(
+                next(source_iter).y.view(-1, 3), axis=1).view(-1, 1)
+        except Exception as err:
+            source_iter = iter(train_loader)
+            source_data = next(source_iter).x.view(-1, 310)
+            source_label = torch.argmax(
+                next(source_iter).y.view(-1, 3), axis=1)
+        try:
+            target_data = next(target_iter).x.view(-1, 310)
+        except Exception as err:
+            target_iter = iter(test_loader)
+            target_data = next(target_iter).x.view(-1, 310)
 
-    for train_data in train_loader:
-        train_data = train_data.cuda()
-
+        source_data, source_label = source_data.to(
+            device), source_label.to(device)
+        target_data = target_data.to(device)
         optimizer.zero_grad()
+        cls_loss, mmd_loss, l1_loss = model(
+            source_data, number_of_source=14, data_tgt=target_data, label_src=source_label, mark=subject_index)
+        gamma = 2 / (1 + math.exp(-10 * (i) / (iteration))) - 1
+        beta = gamma/100
+        loss = cls_loss + gamma * mmd_loss + beta * l1_loss
+        if i % 400 == 0:
+            print("loss: "+str(loss.item()))
 
-        # Multiple Classes classification Loss function
-        t = train_data.y.view(-1, classes)
-        label = torch.argmax(t, axis=1)
-
-        output, _, f_s = model(
-            train_data.x, train_data.edge_index, train_data.batch)
-
-        loss = crit(output, label)
-
-        transfer_losses = []
-        # try:
-        #     data, target = next(test_iter)
-        # except StopIteration:
-        #     test_iter = iter(dataloader)
-        #     data, target = next(test_iter)
-        for test_data in test_loader:
-            test_data = test_data.cuda()
-
-            _, _, f_t = model(
-                test_data.x, test_data.edge_index, test_data.batch)
-            transfer_losses.append(dann_loss(f_s, f_t))
-
-        loss += torch.mean(torch.tensor(transfer_losses))
         loss.backward()
-        loss_all += train_data.num_graphs * loss.item()
-        optimizer.step()
-
-    return loss_all
-
-
-def train(model, train_loader, crit, optimizer, classes):
-    """train
-
-    Args:
-        model (GNN model): model
-        train_loader (loader): loader
-        crit (crit): crit
-        optimizer (optimizer): optimizer
-
-    Returns:
-        loss: loss
-    """
-    model.train()
-    loss_all = 0
-
-    for data in train_loader:
-        data = data.to(device)
-
-        optimizer.zero_grad()
-
-        # Multiple Classes classification Loss function
-        t = data.y.view(-1, classes)
-        label = torch.argmax(t, axis=1)
-
-        output, _ = model(data.x, data.edge_index, data.batch)
-
-        loss = crit(output, label)
-        loss.backward()
-        loss_all += data.num_graphs * loss.item()
         optimizer.step()
     return loss_all
 
@@ -138,7 +123,7 @@ def evaluate(model, loader, classes, crit):
             label = data.y.view(-1, classes)
             data = data.to(device)
 
-            _, pred = model(data.x, data.edge_index, data.batch)
+            pred = model(data.x, number_of_source=14)
             pred = pred.detach().cpu()
             loss = crit(pred, label)
             valid_losses.append(loss.item())
@@ -167,32 +152,34 @@ def evaluate(model, loader, classes, crit):
     return AUC, acc, valid_loss
 
 
-def main(train_config, config):
+def SEED_train_main(session_id, train_setting, config):
 
     lastacc_all = 0.0
-    train_config['channels'] = config['channels']
-    train_config['save'] = False
-    build_dataset(config)  # Build dataset for each fold
+    iteration = math.ceil(config['epochs']*3394/train_setting['batch_size'])
+    train_setting['channels'] = config['channels']
 
     result_data = []
 
     print('Cross Validation.')
-    dfile, _ = recorder(train_config, config)
-    for cv_n in range(0, config['subjects']):
+    dfile, _ = recorder(train_setting, config)
+    for subject_index in range(0, config['subjects']):
 
-        train_dataset, test_dataset = get_dataset(config, cv_n)
+        train_dataset, test_dataset = get_dataset(
+            config, session_id, subject_index)
         train_loader = DataLoader(
-            train_dataset, batch_size=train_config['batch_size'], drop_last=False, shuffle=True)
+            train_dataset, batch_size=train_setting['batch_size'], drop_last=True, shuffle=True)
         test_loader = DataLoader(
-            test_dataset, batch_size=train_config['batch_size'], drop_last=False, shuffle=True)
+            test_dataset, batch_size=train_setting['batch_size'], drop_last=True, shuffle=True)
 
-        # get_nodes_graph(train_dataset[0])
-
-        model = Network(train_config).to(device)
+        model = Network(train_setting).to(device)
 
         optimizer = torch.optim.Adam(
-            model.parameters(), lr=float(train_config['lr']), weight_decay=0.0003)
+            model.parameters(), lr=float(train_setting['lr']), weight_decay=0.0003)
         crit = torch.nn.CrossEntropyLoss()
+        # transfer learning loss function
+        kernels = (GaussianKernel(alpha=0.5), GaussianKernel(
+            alpha=1.), GaussianKernel(alpha=2.))
+        dann_loss = MultipleKernelMaximumMeanDiscrepancy(kernels).cuda()
 
         epoch_data = []
         loss = None
@@ -206,34 +193,30 @@ def main(train_config, config):
         lastacc = 0
         for epoch in range(config['epochs']):
             t0 = time.time()
-
             # transfer learning
-            # loss_all = transfer_train(model, train_loader, test_loader,
-            #                           crit, optimizer, classes, dann_loss)
-
-            loss_all = train(model, train_loader, crit,
-                             optimizer, config['classes'])
+            loss_all = transfer_train(model, train_loader, test_loader,
+                                      crit, optimizer, config['classes'], dann_loss, iteration, subject_index)
+            # loss_all = train(model, train_loader, crit,
+            #                  optimizer, config['classes'])
             loss = loss_all/len(train_dataset)
-            train_AUC, train_acc, _ = evaluate(
-                model, train_loader, config['classes'], crit)
+            train_AUC, train_acc, _ = 0, 0, 0
             val_AUC, val_acc, valid_loss = evaluate(
                 model, test_loader, config['classes'], crit)
 
             epoch_data.append(
-                [str(cv_n), epoch+1, loss, train_AUC, train_acc, val_AUC, valid_loss, val_acc])
+                [str(subject_index), epoch+1, loss, train_AUC, train_acc, val_AUC, valid_loss, val_acc])
             t1 = time.time()
             print('V{:01d}, EP{:03d}, Loss:{:.3f}, AUC:{:.3f}, Acc:{:.3f}, VAUC:{:.2f}, Vacc:{:.2f}, Vloss:{:.2f}, Time: {:.2f}'.format(
-                cv_n, epoch+1, loss, train_AUC, train_acc, val_AUC, val_acc, valid_loss, (t1-t0)))
-            # if train_AUC > 0.999:
+                subject_index, epoch+1, loss, train_AUC, train_acc, val_AUC, val_acc, valid_loss, (t1-t0)))
             if loss < 0.15:
                 break
 
         print('Results::::::::::::')
         print('V{:01d}, EP{:03d}, Loss:{:.3f}, AUC:{:.3f}, Acc:{:.3f}, VAUC:{:.2f}, Vacc:{:.2f}, Vloss:{:.2f}, Time: {:.2f}'.
-              format(cv_n, epoch+1, loss, train_AUC, train_acc, val_AUC, val_acc, valid_loss, (t1-t0)))
+              format(subject_index, epoch+1, loss, train_AUC, train_acc, val_AUC, val_acc, valid_loss, (t1-t0)))
 
         result_data.append(
-            [str(cv_n), epoch+1, loss, train_AUC, train_acc, val_AUC, valid_loss, val_acc])
+            [str(subject_index), epoch+1, loss, train_AUC, train_acc, val_AUC, valid_loss, val_acc])
 
         df = pd.DataFrame(data=result_data, columns=[
             'Fold', 'Epoch', 'Loss', 'Tra_AUC', 'Tra_acc', 'Val_AUC', 'Val_loss', 'Val_acc'])
@@ -258,8 +241,7 @@ def main(train_config, config):
 
 if __name__ == "__main__":
     config = get_args()
-    # build_SEED_dataset(config)
-    test, train = get_dataset(config, 1, 1)
-    train_setting = config['train_setting']
-    main(train_setting, config)
+    # train_setting = config['train_setting']
+    # SEED_train_main(1, train_setting, config)
+    data, label = get_data_label_from_mat(config, 1)
     print()

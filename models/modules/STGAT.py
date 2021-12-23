@@ -66,7 +66,7 @@ class SpatialAttention(torch.nn.Module):
         return S_normalized
 
 
-class SOGAT(torch.nn.Module):
+class STGAT(torch.nn.Module):
     """Self-organized Graph Construction Module
     Args:
         in_features: size of each input sample

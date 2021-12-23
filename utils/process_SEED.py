@@ -39,6 +39,27 @@ def get_data_per_subject(root, feature, label):
     return feature_per_subject, label_per_subject
 
 
+def get_data_per_subject_trial(root, feature, label):
+    feature_per_subject = []
+    label_per_subject = []
+    print(root)
+    # load mat file
+    data = sio.loadmat(root, verify_compressed_data_integrity=False)
+    # Chosen feature from a subject
+
+    for trial_idx in range(15):
+        # transpose so that each row is a channel
+        one_subject_data = np.zeros((62, 5, 265))
+        temp_data = normalization(
+            data[feature + str(trial_idx+1)].transpose(0, 2, 1))
+        one_subject_data[:, :, 0:temp_data.shape[2]] = temp_data
+        feature_per_subject.append(one_subject_data)
+        label_per_subject.append(label[0][trial_idx])
+        # 1s segmentation
+        # shape of one trial->(100+,62,5)
+    return np.array(feature_per_subject), np.array(label_per_subject)
+
+
 def get_data_label_from_mat(config, session_id):
     '''load raw data in SEED dataset with segmentation.
 
@@ -59,7 +80,7 @@ def get_data_label_from_mat(config, session_id):
     label_all_subjects = []
     for filepath in mat_files:
         # get every subject's trials
-        feature_per_subject, label_per_subject = get_data_per_subject(
+        feature_per_subject, label_per_subject = get_data_per_subject_trial(
             filepath, config['feature'], label)
         feature_all_subjects.append(feature_per_subject)
         label_all_subjects.append(label_per_subject)

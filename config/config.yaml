@@ -11,6 +11,11 @@ SEED:
     classes: 3
     channels: 62
     train_setting:
-      batch_size: 16
+      encoders_num: 1
+      gat1: 256
+      heads1: 4
+      gat2: 256
+      heads2: 4
+      batch_size: 256
       drop_rate: 0.5
-      lr: 1e-5
+      lr: 0.01
